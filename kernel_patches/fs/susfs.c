@@ -22,6 +22,7 @@ extern bool susfs_is_current_ksu_domain(void);
 #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
 extern void ksu_try_umount(const char *mnt, bool check_mnt, int flags, uid_t uid);
 #endif
+extern bool susfs_is_avc_log_spoofing_enabled;
 
 #ifdef CONFIG_KSU_SUSFS_ENABLE_LOG
 bool susfs_is_log_enabled __read_mostly = true;
@@ -34,7 +35,84 @@ bool susfs_is_log_enabled __read_mostly = true;
 
 /* sus_path */
 #ifdef CONFIG_KSU_SUSFS_SUS_PATH
+static LIST_HEAD(LH_SUS_PATH_LOOP);
+static LIST_HEAD(LH_SUS_PATH_ANDROID_DATA);
+static LIST_HEAD(LH_SUS_PATH_SDCARD);
 static DEFINE_HASHTABLE(SUS_PATH_HLIST, 10);
+static struct st_android_data_path android_data_path = {0};
+static struct st_sdcard_path sdcard_path = {0};
+
+int susfs_set_i_state_on_external_dir(char __user* user_info, int cmd) {
+	struct path path;
+	int err = 0;
+	struct inode *inode = NULL;
+	char *info = kmalloc(SUSFS_MAX_LEN_PATHNAME, GFP_KERNEL);
+	char *tmp_buf = kmalloc(PAGE_SIZE, GFP_KERNEL);
+	char *resolved_pathname = NULL;
+
+	if (!info) {
+		err = -ENOMEM;
+		return err;
+	}
+
+	if (!tmp_buf) {
+		err = -ENOMEM;
+		goto out_kfree_info;
+	}
+
+	err = strncpy_from_user(info, user_info, SUSFS_MAX_LEN_PATHNAME-1);
+	if (err < 0) {
+		SUSFS_LOGE("failed copying from userspace\n");
+		goto out_kfree_tmp_buf;
+	}
+
+	err = kern_path(info, LOOKUP_FOLLOW, &path);
+	if (err) {
+		SUSFS_LOGE("Failed opening file '%s'\n", info);
+		goto out_kfree_tmp_buf;
+	}
+
+	resolved_pathname = d_path(&path, tmp_buf, PAGE_SIZE);
+	if (!resolved_pathname) {
+		err = -ENOMEM;
+		goto out_path_put_path;
+	}
+
+	inode = d_inode(path.dentry);
+	if (!inode) {
+		err = -EINVAL;
+		goto out_path_put_path;
+	}
+	
+	if (cmd == CMD_SUSFS_SET_ANDROID_DATA_ROOT_PATH) {
+		spin_lock(&inode->i_lock);
+		set_bit(AS_FLAGS_ANDROID_DATA_ROOT_DIR, &inode->i_mapping->flags);
+		spin_unlock(&inode->i_lock);
+		strncpy(android_data_path.pathname, resolved_pathname, SUSFS_MAX_LEN_PATHNAME-1);
+		android_data_path.is_inited = true;
+		SUSFS_LOGI("Set android data root dir: '%s', i_mapping: '0x%p'\n",
+			android_data_path.pathname, inode->i_mapping);
+	} else if (cmd == CMD_SUSFS_SET_SDCARD_ROOT_PATH) {
+		spin_lock(&inode->i_lock);
+		set_bit(AS_FLAGS_SDCARD_ROOT_DIR, &inode->i_mapping->flags);
+		spin_unlock(&inode->i_lock);
+		strncpy(sdcard_path.pathname, resolved_pathname, SUSFS_MAX_LEN_PATHNAME-1);
+		sdcard_path.is_inited = true;
+		SUSFS_LOGI("Set sdcard root dir: '%s', i_mapping: '0x%p'\n",
+			sdcard_path.pathname, inode->i_mapping);
+	} else {
+		err = -EINVAL;
+	}
+
+out_path_put_path:
+	path_put(&path);
+out_kfree_tmp_buf:
+	kfree(tmp_buf);
+out_kfree_info:
+	kfree(info);
+	return err;
+}
+
 static int susfs_update_sus_path_inode(char *target_pathname) {
 	struct path p;
 	struct inode *inode = NULL;
@@ -125,6 +203,16 @@ int susfs_add_sus_path(struct st_susfs_sus_path* __user user_info) {
 	spin_unlock(&susfs_spin_lock);
 	return 0;
 }
+
+int susfs_add_sus_path_loop(struct st_susfs_sus_path* __user user_info) {
+	/* placeholder currently */
+	return 0;
+}
+
+void susfs_run_sus_path_loop(uid_t uid) {
+	/* placeholder currently */
+}
+
 
 int susfs_sus_ino_for_filldir64(unsigned long ino) {
 	struct st_susfs_sus_path_hlist *entry;
@@ -900,6 +988,119 @@ out:
 	return 1;
 }
 #endif // #ifdef CONFIG_KSU_SUSFS_SUS_SU
+
+static int copy_config_to_buf(const char *config_string, char *buf_ptr, size_t *copied_size, size_t bufsize) {
+	size_t tmp_size = strlen(config_string);
+
+	*copied_size += tmp_size;
+	if (*copied_size >= bufsize) {
+		SUSFS_LOGE("bufsize is not big enough to hold the string.\n");
+		return -EINVAL;
+	}
+	strncpy(buf_ptr, config_string, tmp_size);
+	return 0;
+}
+
+int susfs_get_enabled_features(char __user* buf, size_t bufsize) {
+	char *kbuf = NULL, *buf_ptr = NULL;
+	size_t copied_size = 0;
+	int err = 0;
+
+	kbuf = kzalloc(bufsize, GFP_KERNEL);
+	if (!kbuf) {
+		return -ENOMEM;
+	}
+
+	buf_ptr = kbuf;
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+	err = copy_config_to_buf("CONFIG_KSU_SUSFS_SUS_PATH\n", buf_ptr, &copied_size, bufsize);
+	if (err) goto out_kfree_kbuf;
+	buf_ptr = kbuf + copied_size;
+#endif
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+	err = copy_config_to_buf("CONFIG_KSU_SUSFS_SUS_MOUNT\n", buf_ptr, &copied_size, bufsize);
+	if (err) goto out_kfree_kbuf;
+	buf_ptr = kbuf + copied_size;
+#endif
+#ifdef CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT
+	err = copy_config_to_buf("CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT\n", buf_ptr, &copied_size, bufsize);
+	if (err) goto out_kfree_kbuf;
+	buf_ptr = kbuf + copied_size;
+#endif
+#ifdef CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT
+	err = copy_config_to_buf("CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT\n", buf_ptr, &copied_size, bufsize);
+	if (err) goto out_kfree_kbuf;
+	buf_ptr = kbuf + copied_size;
+#endif
+#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
+	err = copy_config_to_buf("CONFIG_KSU_SUSFS_SUS_KSTAT\n", buf_ptr, &copied_size, bufsize);
+	if (err) goto out_kfree_kbuf;
+	buf_ptr = kbuf + copied_size;
+#endif
+#ifdef CONFIG_KSU_SUSFS_TRY_UMOUNT
+	err = copy_config_to_buf("CONFIG_KSU_SUSFS_TRY_UMOUNT\n", buf_ptr, &copied_size, bufsize);
+	if (err) goto out_kfree_kbuf;
+	buf_ptr = kbuf + copied_size;
+#endif
+#ifdef CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT
+	err = copy_config_to_buf("CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT\n", buf_ptr, &copied_size, bufsize);
+	if (err) goto out_kfree_kbuf;
+	buf_ptr = kbuf + copied_size;
+#endif
+#ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME
+	err = copy_config_to_buf("CONFIG_KSU_SUSFS_SPOOF_UNAME\n", buf_ptr, &copied_size, bufsize);
+	if (err) goto out_kfree_kbuf;
+	buf_ptr = kbuf + copied_size;
+#endif
+#ifdef CONFIG_KSU_SUSFS_ENABLE_LOG
+	err = copy_config_to_buf("CONFIG_KSU_SUSFS_ENABLE_LOG\n", buf_ptr, &copied_size, bufsize);
+	if (err) goto out_kfree_kbuf;
+	buf_ptr = kbuf + copied_size;
+#endif
+#ifdef CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS
+	err = copy_config_to_buf("CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS\n", buf_ptr, &copied_size, bufsize);
+	if (err) goto out_kfree_kbuf;
+	buf_ptr = kbuf + copied_size;
+#endif
+#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
+	err = copy_config_to_buf("CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG\n", buf_ptr, &copied_size, bufsize);
+	if (err) goto out_kfree_kbuf;
+	buf_ptr = kbuf + copied_size;
+#endif
+#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
+	err = copy_config_to_buf("CONFIG_KSU_SUSFS_OPEN_REDIRECT\n", buf_ptr, &copied_size, bufsize);
+	if (err) goto out_kfree_kbuf;
+	buf_ptr = kbuf + copied_size;
+#endif
+#ifdef CONFIG_KSU_SUSFS_SUS_SU
+	err = copy_config_to_buf("CONFIG_KSU_SUSFS_SUS_SU\n", buf_ptr, &copied_size, bufsize);
+	if (err) goto out_kfree_kbuf;
+	buf_ptr = kbuf + copied_size;
+#endif
+#ifdef CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT
+	err = copy_config_to_buf("CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT\n", buf_ptr, &copied_size, bufsize);
+	if (err) goto out_kfree_kbuf;
+	buf_ptr = kbuf + copied_size;
+#endif
+	err = copy_to_user((void __user*)buf, (void *)kbuf, bufsize);
+out_kfree_kbuf:
+	kfree(kbuf);
+	return err;
+}
+
+void susfs_set_current_non_root_user_app_proc(void) {
+	
+}
+
+/* susfs avc log spoofing */
+void susfs_set_avc_log_spoofing(bool enabled) {
+	spin_lock(&susfs_spin_lock);
+	susfs_is_avc_log_spoofing_enabled = enabled;
+	spin_unlock(&susfs_spin_lock);
+	SUSFS_LOGI("enabled: %d\n", enabled);
+}
+
+
 
 /* susfs_init */
 void susfs_init(void) {

@@ -36,6 +36,16 @@ struct st_susfs_sus_path_hlist {
 	char                             target_pathname[SUSFS_MAX_LEN_PATHNAME];
 	struct hlist_node                node;
 };
+
+struct st_android_data_path {
+    char                             pathname[SUSFS_MAX_LEN_PATHNAME];
+    bool                             is_inited;
+};
+
+struct st_sdcard_path {
+    char                             pathname[SUSFS_MAX_LEN_PATHNAME];
+    bool                             is_inited;
+};
 #endif
 
 /* sus_mount */
@@ -127,6 +137,7 @@ struct st_sus_su {
 /***********************/
 /* sus_path */
 #ifdef CONFIG_KSU_SUSFS_SUS_PATH
+int susfs_set_i_state_on_external_dir(char __user* user_info, int cmd);
 int susfs_add_sus_path(struct st_susfs_sus_path* __user user_info);
 int susfs_sus_ino_for_filldir64(unsigned long ino);
 #endif
@@ -182,5 +193,6 @@ int susfs_sus_su(struct st_sus_su* __user user_info);
 #endif
 /* susfs_init */
 void susfs_init(void);
+void susfs_set_current_non_root_user_app_proc(void);
 
 #endif

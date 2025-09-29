@@ -980,10 +980,10 @@ index b15a4719a8c8..fb46ebd7e767 100644
  	}
  
 diff --git a/fs/proc_namespace.c b/fs/proc_namespace.c
-index bd07f0f4f06b..385619bd3b2f 100644
+index 250eb5bf7b52..d448e3bc270c 100644
 --- a/fs/proc_namespace.c
 +++ b/fs/proc_namespace.c
-@@ -12,6 +12,9 @@
+@@ -12,12 +12,19 @@
  #include <linux/security.h>
  #include <linux/fs_struct.h>
  #include <linux/sched/task.h>
@@ -993,37 +993,49 @@ index bd07f0f4f06b..385619bd3b2f 100644
  
  #include "proc/internal.h" /* only for get_proc_task() in ->open() */
  
-@@ -102,6 +105,11 @@ static int show_vfsmnt(struct seq_file *m, struct vfsmount *mnt)
+ #include "pnode.h"
+ #include "internal.h"
+ 
++#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
++bool susfs_hide_sus_mnts_for_all_procs = true; // hide sus mounts for all processes by default
++#endif
++
+ static __poll_t mounts_poll(struct file *file, poll_table *wait)
+ {
+ 	struct seq_file *m = file->private_data;
+@@ -106,6 +113,12 @@ static int show_vfsmnt(struct seq_file *m, struct vfsmount *mnt)
  	struct super_block *sb = mnt_path.dentry->d_sb;
  	int err;
  
 +#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
-+	if (unlikely(r->mnt_id >= DEFAULT_SUS_MNT_ID))
++	if (susfs_hide_sus_mnts_for_all_procs && r->mnt_id >= DEFAULT_SUS_MNT_ID) {
 +		return 0;
++	}
 +#endif
 +
  	if (sb->s_op->show_devname) {
  		err = sb->s_op->show_devname(m, mnt_path.dentry);
  		if (err)
-@@ -138,6 +146,11 @@ static int show_mountinfo(struct seq_file *m, struct vfsmount *mnt)
+@@ -140,6 +153,11 @@ static int show_mountinfo(struct seq_file *m, struct vfsmount *mnt)
  	struct path mnt_path = { .dentry = mnt->mnt_root, .mnt = mnt };
  	int err;
  
 +#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
-+	if (unlikely(r->mnt_id >= DEFAULT_SUS_MNT_ID))
++	if (susfs_hide_sus_mnts_for_all_procs && r->mnt_id >= DEFAULT_SUS_MNT_ID) {
 +		return 0;
++	}
 +#endif
-+
  	seq_printf(m, "%i %i %u:%u ", r->mnt_id, r->mnt_parent->mnt_id,
  		   MAJOR(sb->s_dev), MINOR(sb->s_dev));
  	if (sb->s_op->show_path) {
-@@ -202,6 +215,11 @@ static int show_vfsstat(struct seq_file *m, struct vfsmount *mnt)
+@@ -202,6 +220,12 @@ static int show_vfsstat(struct seq_file *m, struct vfsmount *mnt)
  	struct super_block *sb = mnt_path.dentry->d_sb;
  	int err;
  
 +#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
-+	if (unlikely(r->mnt_id >= DEFAULT_SUS_MNT_ID))
++	if (susfs_hide_sus_mnts_for_all_procs && r->mnt_id >= DEFAULT_SUS_MNT_ID) {
 +		return 0;
++	}
 +#endif
 +
  	/* device */
@@ -1332,3 +1344,46 @@ index 909045dc07cd..9c10189f0dac 100644
  	up_read(&uts_sem);
  	if (copy_to_user(name, &tmp, sizeof(tmp)))
  		return -EFAULT;
+diff --git a/security/selinux/avc.c b/security/selinux/avc.c
+index 9f44a0f446ec..7fd684407810 100644
+--- a/security/selinux/avc.c
++++ b/security/selinux/avc.c
+@@ -47,6 +47,12 @@
+ #define avc_cache_stats_incr(field)	do {} while (0)
+ #endif
+ 
++#ifdef CONFIG_KSU_SUSFS
++extern u32 susfs_ksu_sid;
++extern u32 susfs_kernel_sid;
++bool susfs_is_avc_log_spoofing_enabled = false;
++#endif
++
+ struct avc_entry {
+ 	u32			ssid;
+ 	u32			tsid;
+@@ -719,11 +725,23 @@ static void avc_audit_post_callback(struct audit_buffer *ab, struct selinux_state *state,
+			   u32 ssid, u32 tsid, u16 tclass)
+ 
+ 	rc = security_sid_to_context(state, tsid, &scontext, &scontext_len);
++#ifdef CONFIG_KSU_SUSFS
++	if (unlikely(tsid == susfs_ksu_sid && susfs_is_avc_log_spoofing_enabled)) {
++	       if (rc)
++		       audit_log_format(ab, " tsid=%d", susfs_kernel_sid);
++	       else
++		       audit_log_format(ab, " tcontext=%s", "u:r:kernel:s0");
++	       goto bypass_orig_flow;
++	}
++#endif
+ 	if (rc)
+ 		audit_log_format(ab, " tsid=%d", tsid);
+ 	else {
+ 		audit_log_format(ab, " tcontext=%s", scontext);
+ 		kfree(scontext);
+ 	}
+ 
++#ifdef CONFIG_KSU_SUSFS
++bypass_orig_flow:
++#endif
+ 	BUG_ON(!tclass || tclass >= ARRAY_SIZE(secclass_map));
+ 	audit_log_format(ab, " tclass=%s", secclass_map[tclass-1].name);
+ }

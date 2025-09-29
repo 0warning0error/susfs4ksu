@@ -50,7 +50,16 @@
  * task_struct->susfs_last_fake_mnt_id => storing last valid fake mnt_id
  * task_struct->susfs_task_state => storing flag 'TASK_STRUCT_'
  */
+ // thread_info->flags is unsigned long :D
+#define TIF_NON_ROOT_USER_APP_PROC 33
+#define TIF_PROC_SU_NOT_ALLOWED 34
 
+#define AS_FLAGS_SUS_PATH 24
+#define AS_FLAGS_SUS_MOUNT 25
+#define AS_FLAGS_SUS_KSTAT 26
+#define AS_FLAGS_OPEN_REDIRECT 27
+#define AS_FLAGS_ANDROID_DATA_ROOT_DIR 28
+#define AS_FLAGS_SDCARD_ROOT_DIR 29
 #define INODE_STATE_SUS_PATH BIT(24)
 #define INODE_STATE_SUS_MOUNT BIT(25)
 #define INODE_STATE_SUS_KSTAT BIT(26)
